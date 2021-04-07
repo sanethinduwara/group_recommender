@@ -15,6 +15,19 @@ from sklearn.model_selection import train_test_split
 from group_generator import GroupGenerator
 from movie_recommender import MovieRecommender
 
+from flask import Flask
+from flask import request
+from flask import jsonify
+from flask_cors import CORS
+
+
+
+
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+app = Flask(__name__)
+cors = CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+
 def set_random_seed(state=1):
     gens = (np.random.seed, torch.manual_seed, torch.cuda.manual_seed)
     for set_state in gens:
@@ -53,8 +66,48 @@ def batches(X, y, bs=32, shuffle=True):
         yb = torch.FloatTensor(yb)
         yield xb, yb.view(-1, 1)
 
-if __name__ == '__main__':
+def train_model(net, dataset, optimizer, scheduler, criterion, stats, bs):
+    running_loss = 0
+    
+    for batch in batches(*dataset, shuffle=True, bs=bs):
+        x_batch, y_batch = [b.to(device) for b in batch]
+        optimizer.zero_grad()
 
+        # calculate gradients
+        with torch.set_grad_enabled(True):
+            outputs = net(x_batch[:,0], x_batch[:,1])
+            loss = criterion(outputs, y_batch)
+            
+            # update weights
+            scheduler.step()
+            loss.backward()
+            optimizer.step()
+                
+        running_loss += loss.item()
+        
+    epoch_loss = running_loss / len(dataset[0])
+    stats['train'] = epoch_loss
+    
+  
+def test_model(net, dataset, optimizer, criterion,stats, bs):
+    running_loss = 0
+    optimizer.zero_grad()
+
+    for batch in batches(*dataset, shuffle=False, bs=bs):
+        x_batch, y_batch = [b.to(device) for b in batch]
+
+        # calculate gradients
+        with torch.set_grad_enabled(False):
+            outputs = net(x_batch[:,0], x_batch[:,1])
+            loss = criterion(outputs, y_batch)
+                
+        running_loss += loss.item()
+        
+    epoch_loss = running_loss / len(dataset[0])
+    stats['val'] = epoch_loss
+
+@app.route("/api/retrain")
+def retrain_model():
     RANDOM_STATE = 1
     lr = 1e-3
     wd = 1e-5
@@ -77,10 +130,6 @@ if __name__ == '__main__':
 
     util = Utility(ratings)
 
-    # gg = GroupGenerator()
-    # groups = gg.generate_groups(ratings, 3)
-    # g_ratings = gg.generate_group_ratings(ratings, groups)
-
     (n, m), (X, y), _ = transform_dataset(ratings)
     print(f'Dataset: {n} users, {m} movies')
 
@@ -91,8 +140,6 @@ if __name__ == '__main__':
 
     net = NeuralNet(n_users=n, n_movies=m, n_factors=32, drop=0.2)
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
     net.to(device)
     criterion = nn.MSELoss(reduction='sum')
     optimizer = optim.Adam(net.parameters(), lr=lr, weight_decay=wd)
@@ -101,53 +148,12 @@ if __name__ == '__main__':
 
     for epoch in range(n_epochs):
         stats = {'epoch': epoch + 1, 'total': n_epochs}
+
+        train_model(net, datasets['train'], optimizer, scheduler, criterion, stats, bs)
+        test_model(net, datasets['val'],optimizer, criterion, stats, bs)
         
-        for phase in ('train', 'val'):
-            if phase == 'train':
-                training = True
-            else:
-                training = False
-
-            running_loss = 0
-            n_batches = 0
-            
-            for batch in batches(*datasets[phase], shuffle=training, bs=bs):
-                x_batch, y_batch = [b.to(device) for b in batch]
-                optimizer.zero_grad()
-
-                
-                # calculate gradients when training
-                with torch.set_grad_enabled(training):
-                    outputs = net(x_batch[:,0], x_batch[:,1])
-                    loss = criterion(outputs, y_batch)
-                    
-                    # update weights only when training
-                    if training:
-                        scheduler.step()
-                        loss.backward()
-                        optimizer.step()
-                        lr_history.extend(scheduler.get_lr())
-                        
-                running_loss += loss.item()
-                
-            epoch_loss = running_loss / dataset_sizes[phase]
-            stats[phase] = epoch_loss
-            
-            # early stopping before get overfitted
-            if phase == 'val':
-                if epoch_loss < best_loss:
-                    print('loss improvement on epoch: %d' % (epoch + 1))
-                    best_loss = epoch_loss
-                    best_weights = copy.deepcopy(net.state_dict())
-                    no_improvements = 0
-                else:
-                    no_improvements += 1
-                    
         history.append(stats)
         print('[{epoch:03d}/{total:03d}] train: {train:.4f} - val: {val:.4f}'.format(**stats))
-        if no_improvements >= patience:
-            print('early stopping after epoch {epoch:03d}'.format(**stats))
-            break
 
     # calculate RMSE
 
@@ -169,15 +175,32 @@ if __name__ == '__main__':
     # saving the model
     torch.save(net, "trained_model")
 
+    return jsonify({"RMSE": final_loss})
+
+@app.route("/api/recommended/<id>")
+def get_recommendations(id):
+
+    r_type = request.args.get('type', default = 'user', type = str)
+
     # getting some recommendations
     recommender = MovieRecommender()
-    for x in range(10):
-        print('---------------------', 'Recommendation for Group ', str(x+1), '---------------------')
-        y = recommender.get_recommendation_by_id(x+1, type="group")
-        print(y)
+    movies_df = None
+
+    if(r_type == 'group'):
+        movies_df = recommender.get_recommendation_by_id(int(id), type="group")
+    else:
+        movies_df = recommender.get_recommendation_by_id(int(id))
+    return jsonify(movies_df.replace(np.nan, '', regex=True).to_dict('records')), 200
+
+@app.route("/api/movies")
+def get_all_movies():
+    dataset = Dataset()
+    return jsonify(dataset.load_movies().replace(np.nan, '', regex=True).to_dict('records')), 200
     
-    for x in range(10):
-        print('---------------------', 'Recommendation for User ', str(x+1), '---------------------')
-        y = recommender.get_recommendation_by_id(x+1)
-        print(y)
-    
+@app.route("/api/groups/user/<id>")
+def get_groups_by_id(id):
+    util = Utility() 
+    return jsonify(util.get_groups_by_user_id(id).to_dict('records')), 200
+
+if __name__ == "__main__":
+    app.run()

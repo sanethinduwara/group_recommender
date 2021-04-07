@@ -24,7 +24,7 @@ class Dataset(object):
 
     def load_groups(self):
         group_cols = ['groupId', 'users']
-        return pd.read_csv(self.__generated_dataset_path + 'groups.csv', sep='\t', names=group_cols, encoding='latin-1')
+        return pd.read_csv(self.__generated_dataset_path + 'groups.csv', sep='\t', names=group_cols, encoding='latin-1', skiprows=1)
 
     def load_group_ratings(self):
         group_rating_cols = ['groupId', 'movieId', 'rating']

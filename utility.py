@@ -6,7 +6,7 @@ from dataset import Dataset
 
 class Utility(object):
 
-    def __init__(self, ratings):
+    def __init__(self, ratings=None):
         self.ratings = ratings
 
     def group_by_movies(self):
@@ -26,3 +26,7 @@ class Utility(object):
         unrated_movies = np.setdiff1d(all_movies, rated_movies)
         return torch.LongTensor(np.full((1, len(unrated_movies)), user_id)[0]), torch.LongTensor(unrated_movies)
 
+    def get_groups_by_user_id(self, id):
+        dataset = Dataset()
+        groups = dataset.load_groups()
+        return groups[pd.DataFrame(groups['users'].str.split(',').tolist()).isin([id]).any(1).values]
