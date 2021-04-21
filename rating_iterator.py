@@ -1,6 +1,7 @@
 import math
 import numpy as np
 
+
 class RatingIterator:
     
     def __init__(self, X, y, batch_size=32, shuffle=True):
@@ -30,4 +31,3 @@ class RatingIterator:
         self._current += 1
         bs = self.batch_size
         return self.X[k*bs:(k + 1)*bs], self.y[k*bs:(k + 1)*bs]
-        
