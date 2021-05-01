@@ -12,7 +12,7 @@ class ModelEvaluator:
         with torch.no_grad():
             for batch in batches:
                 x_batch, y_batch = [b.to(device) for b in batch]
-                outputs = net(x_batch[:, 0], x_batch[:, 1], r_type)
+                outputs = net(x_batch, r_type)
                 expected_ratings.extend(y_batch.tolist())
                 predictions.extend(outputs.tolist())
 

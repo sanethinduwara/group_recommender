@@ -1,9 +1,10 @@
 import torch
 import numpy as np
 import pandas as pd
+from data_preprocessor import DataPreprocessor
 from dataset import Dataset
 from utility import Utility
-from rating_aggragator import RatingAggragator
+from util.data_loader import DataLoader
 
 
 class MovieRecommender(object):
@@ -15,88 +16,80 @@ class MovieRecommender(object):
 
     def get_recommendation_by_id(self, id, type="user"):
         return self._get_user_recommendations(id, k=10, r_type=type)
-        # if type == "user":
-        #     return self._get_user_recommendations(id, k=10, r_type=type)
-        # if type == "group":
-        #     return self._get_group_recommendations(id, k=10)
 
     def _get_user_recommendations(self, user_id, k=None, r_type="user"):
 
         _unrated_movies = None
-        _utility = Utility(self.dataset.load_ratings())
+        user_df = None
+        member_df = None
+
+        _utility = Utility(self.dataset)
+        pre_processor = DataPreprocessor(self.dataset)
 
         # get movies which are not rated by user
         if r_type == "user":
-            _unrated_movies = _utility._get_unrated_movies_by_user_id(user_id)
+            _unrated_movies = _utility.get_unrated_movies_by_user_id(user_id)
+            users = self.dataset.load_users()
+            user_df = users.loc[users['userId'] == user_id]
+            user_df = pre_processor.transform_users_df(user_df)
+
         elif r_type == "group":
-            _unrated_movies = _utility._get_unrated_movies_by_group_id(user_id)
+            _unrated_movies = _utility.get_unrated_movies_by_group_id(user_id)
+            groups = self.dataset.load_groups()
+            user_df = groups.loc[groups['groupId'] == user_id]
+            if user_df.shape[0] == 0:
+                groups = DataLoader().load_groups().iloc[:, 0:2]
+                user_df = groups.loc[groups['groupId'] == user_id]
+                user_df = pre_processor.transform_groups_df(user_df)
 
-        _unrated_movies_initial_ids = _unrated_movies[1].detach().clone()
-        _unrated_movie_ids = _unrated_movies[1]
-        _unrated_user_ids = _unrated_movies[0]
+                users = pre_processor.transform_users_df()
+                member_df = users[users.userId.isin(list(user_df.users)[0])]
+                member_df.reset_index(drop=True, inplace=True)
+            else:
+                user_df = pre_processor.transform_groups_df(user_df)
+                member_df = None
 
-        movie_index_mapping = np.load('movie_index_mapping.npy', allow_pickle='TRUE').item()
-        user_index_mapping = np.load('user_index_mapping.npy', allow_pickle='TRUE').item()
+            user_df = user_df.drop(['users'], axis=1)
 
-        _unrated_movie_ids = _unrated_movie_ids.apply_(lambda x: movie_index_mapping[x])
+        user_df = pd.concat([user_df]*_unrated_movies.shape[0], ignore_index=True)
+        _unrated_movies = pre_processor.transform_movies_df(_unrated_movies)
 
+        user_df.reset_index(drop=True, inplace=True)
+        _unrated_movies.reset_index(drop=True, inplace=True)
+
+        data = pd.concat([user_df, _unrated_movies], axis=1)
         if r_type == "user":
-            _unrated_user_ids = _unrated_user_ids.apply_(lambda x: user_index_mapping[x])
-        elif r_type == "group":
-            _unrated_user_ids = _unrated_user_ids-1
+            dataset_columns = list(data.columns)
+            temp = dataset_columns[25]
+            dataset_columns.remove(temp)
+            dataset_columns.insert(1, temp)
 
-        _predicted_ratings = self.model(_unrated_user_ids, _unrated_movie_ids, r_type)
+            data = data[dataset_columns]
+
+        _predicted_ratings = self.model(torch.Tensor(data.values), r_type, members=member_df)
         _predicted_ratings = _predicted_ratings * 5
 
-        _top_recommendations = self._get_top_k_recommendations(
-            _unrated_movies_initial_ids,
-            _predicted_ratings.cpu().detach().numpy(),
-            k
-        )
+        data['rating'] = torch.flatten(_predicted_ratings).tolist()
+
+        data = data.drop(data.columns[2: len(data.columns)-1], axis=1)
+
+        _top_recommendations = self._get_top_k_recommendations(data, k)
         return _top_recommendations
-            
-        
 
-    # def _get_group_recommendations(self, id, k=None):
-    #     _group = self._get_group_by_id(id)
-    #     _df_arr = []
-    #     for _u_id in _group['userIds'][id-1].split(','):
-    #         _user_ratings = self._get_user_recommendations(int(_u_id))
-    #         _df_arr.append(_user_ratings)
-            
-    #     _df_arr = self._get_movies_in_common(_df_arr)
-    #     _g_ratings = RatingAggragator.average(_df_arr)
-    #     _g_ratings = _g_ratings.reset_index()
-    #     if not k==None:
-    #         return _g_ratings[0:k]
-    #     return _g_ratings
+    def _get_top_k_recommendations(self, data, k=None):
 
-    def _get_movies_in_common(self, df_arr):
-        arr1 = df_arr[0]
-        new_arr = []
-        for x in range(1, len(df_arr)):
-            arr1 = pd.merge(arr1, df_arr[x], how='inner', on=['movieId'])
-        
-        for y in range(len(df_arr)):
-            new_arr.append(df_arr[y][df_arr[y]['movieId'].isin(list(arr1.movieId))]) 
-        return new_arr
-
-    def _get_top_k_recommendations(self, movies, ratings, k=None):
+        movie_index_mapping = np.load('movie_index_mapping.npy', allow_pickle='TRUE').item()
 
         # load all movies
         _all_movies = self.dataset.load_movies()
 
-        _reshaped_prediction = np.vstack((movies, ratings.reshape(-1))).T
-        _reshaped_prediction[:, 0].astype(np.int64)
-        _sorted_ratings = _reshaped_prediction[np.argsort(-_reshaped_prediction[:, 1])]
-        top_k = _sorted_ratings
+        data = data.sort_values(by=['rating'], ascending=False)
+        top_k = data
 
-        if not k==None:
-            top_k = _sorted_ratings[0:k]
+        if k is not None:
+            top_k = data[0:k]
 
-        top_k_as_df = pd.DataFrame({'movieId': top_k[:, 0], 'rating': top_k[:, 1]})
-        return top_k_as_df.merge(_all_movies, on='movieId')
-
-    def _get_group_by_id(self, id):
-        _groups = self.dataset.load_generated_groups()
-        return _groups.loc[_groups['groupId'] == id]
+        top_k.movieId = top_k.movieId.apply(lambda x: Utility.get_key_by_value(movie_index_mapping, x))
+        recommendations = _all_movies[_all_movies.movieId.isin(top_k.movieId.tolist())]
+        recommendations['rating'] = top_k.rating.tolist()
+        return recommendations

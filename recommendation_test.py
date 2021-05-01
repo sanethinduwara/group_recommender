@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import pandas as pd
 import time
+from data_preprocessor import DataPreprocessor
 from dataset import Dataset
 
 
@@ -23,13 +24,28 @@ class RecommendationTest(object):
         print(df)
 
 
-
         predicted_ratings = self.model(
             torch.LongTensor(df.userId.values).apply_(lambda x: self.user_index_mapping[x]),
             torch.LongTensor(df.movieId.values).apply_(lambda x: self.movie_index_mapping[x])
         )
         predicted_ratings = predicted_ratings * 5
         print(predicted_ratings)
+
+    def accuracy2(self):
+        all_ratings = DataPreprocessor(self.dataset).get_final_dataset()
+        random_indices = np.random.choice(all_ratings.shape[0], 6, replace=False)
+        df = pd.DataFrame()
+        for i in random_indices:
+            df = pd.concat([df, all_ratings[i:i+1]])
+
+        df.rating = df.rating * 5
+        print(df)
+
+        predicted_ratings = self.model(
+            torch.LongTensor(df.iloc[:, 0:44].values)
+        )
+
+        print(predicted_ratings*5)
 
     def performance(self, r_type="user"):
         x = [50, 100, 200, 500, 1000, 2000, 3500]
